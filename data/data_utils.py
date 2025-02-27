@@ -52,7 +52,7 @@ def random_flip(img):
 
     tmp_odd1 = np.random.random_sample()
     tmp_odd2 = np.random.random_sample()
-    tmp_odd3 = np.random.random_sample()
+    # tmp_odd3 = np.random.random_sample()
 
     # flip at 50% chance
     if tmp_odd1 <= 0.5:
@@ -61,8 +61,8 @@ def random_flip(img):
     if tmp_odd2 <= 0.5:
         img = np.flip(img, axis=1)
 
-    if tmp_odd3 <= 0.5:
-        img = np.flip(img, axis=2)
+    # if tmp_odd3 <= 0.5:
+    #     img = np.flip(img, axis=2)
 
     return img
 
@@ -74,7 +74,7 @@ def norm_img(img, percentile=100):
 
 def get_bounds(img):
     # img: torchio.ScalarImage.data / torch.tensor
-    # return: idx, a list containing [x_min, x_max, y_min, y_max, z_min, z_max)
+    # return: idx, a list containing [x_min, x_max, y_min, y_max]
     img = np.squeeze(img.numpy())
     nz_idx = np.nonzero(img)
     idx = []

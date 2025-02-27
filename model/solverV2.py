@@ -257,9 +257,7 @@ class mpl_trainer(nn.Module):
             if not self.is_teacher_init:
                 self.model._init_ema_weights()
                 self.is_teacher_init = True
-
             if not self.cfg.train.test_time:
-
                 seg_loss, seg_loss_aux, cos_feat, pred_seg, pred_aux = self.model.train_source_only1(cord_src, img_src, label_src,
                                                                                                      global_src, label_src_aux, self.cfg.train.mask_ratio)
                 pseudo_label_loc_logit, pseudo_label_global_logit = self.model.get_pseudo_label(

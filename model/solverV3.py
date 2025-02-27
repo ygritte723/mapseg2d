@@ -214,6 +214,7 @@ class mpl_trainer(nn.Module):
         }
 
     def train_step(self, data, epoch):
+        
         torch.cuda.empty_cache()
         self.total_step += 1
         if epoch > self.cfg.train.warmup:
@@ -229,6 +230,7 @@ class mpl_trainer(nn.Module):
             data['downA'].float().cuda(), \
             data['cord_A']
         if epoch <= self.cfg.train.warmup:
+ 
             # L_sup: seg_loss = L_Seg()
             # L_MPL: seg_loss_masked, pse_seg_loss
             # L_global: seg_loss_aux, seg_loss_aux_masked, cos_feat, cos_feat_masked, pse_seg_loss_aux, pse_cos_feat
@@ -260,9 +262,37 @@ class mpl_trainer(nn.Module):
                 self.model._init_ema_weights()
                 self.is_teacher_init = True
             if not self.cfg.train.test_time:
+                # print("train")
                 seg_loss, seg_loss_masked, seg_loss_aux, seg_loss_aux_masked, cos_feat, cos_feat_masked, pred_seg, pred_seg_masked, pred_aux, mask_seg = \
                     self.model.train_source(cord_src, img_src, label_src,
                                             global_src, label_src_aux, self.cfg.train.mask_ratio)
+                # print("train source: ")
+                # print("seg_loss: ", seg_loss)
+                # print("seg_loss_masked: ", seg_loss_masked)
+                # print("seg_loss_aux: ", seg_loss_aux)
+                # print("seg_loss_aux_masked: ", seg_loss_aux_masked)
+                # print("cos_feat: ", cos_feat)
+                # print("cos_feat_masked: ", cos_feat_masked)
+                # print("pred_seg size: ", pred_seg.shape)
+                # print("pred_seg_masked size: ", pred_seg_masked.shape)
+                # print("pred_aux size: ", pred_aux.shape)
+                # print("mask_seg size: ", mask_seg.shape)
+                
+                seg_loss_masked_1, seg_loss_aux_masked_1, cos_feat_masked_1, pred_seg_masked_1, pred_aux_masked_1 = \
+                    self.model.train_source_only1(cord_src, img_src, label_src, global_src, label_src_aux, self.cfg.train.mask_ratio)
+                # print("train source only 1: ")
+                # print("seg_loss_masked_1: ", seg_loss_masked_1)
+                # print("seg_loss_aux_masked_1: ", seg_loss_aux_masked_1)
+                # print("cos_feat_masked_1: ", cos_feat_masked_1)
+                # print("pred_seg_masked_1 shape: ", pred_seg_masked_1.shape)
+                # print("pred_aux_masked_1 shape: ", pred_aux_masked_1.shape)
+                
+                seg_loss_masked = (seg_loss_masked + seg_loss_masked_1) * 0.5
+                seg_loss_aux_masked = (seg_loss_aux_masked + seg_loss_aux_masked_1) * 0.5
+                cos_feat_masked = (cos_feat_masked + cos_feat_masked_1) * 0.5
+                # pred_seg_masked = (pred_seg_masked + pred_seg_masked_1) * 0.5
+                # pred_aux_masked = (pred_aux_masked + pred_aux_masked_1) * 0.5
+                                
                 pseudo_label_loc_logit, pseudo_label_global_logit = self.model.get_pseudo_label(
                     img_tgt, global_tgt, cord_tgt)
                 pseudo_label_loc = self.model.get_pseudo_label_and_weight(
@@ -366,7 +396,7 @@ class mpl_trainer(nn.Module):
 
         # save images
         vis = OrderedDict()
-        slc_num = self.cfg.data.patch_size[-2]//2
+        # slc_num = self.cfg.data.patch_size[-2]//2
         for k, v in self.visual_dict.items():
             # print(f"k: {k}, v.shape: {v.shape}")  # Debugging
 
@@ -405,14 +435,14 @@ class mpl_trainer(nn.Module):
         self.model.eval()
         x, y, z = self.cfg.data.patch_size
         # If shape is (256, 2, 256), swap axes to (256, 256, 2)
-        if tmp_scans.shape == (256, 2, 256):
-            tmp_scans = np.transpose(tmp_scans, (0, 2, 1))  # (256, 256, 2)
-        if tmp_scans.shape == (256, 3, 256):
-            tmp_scans = np.transpose(tmp_scans, (0, 2, 1))  # (256, 256, 2)
+        # if tmp_scans.shape == (256, 2, 256):
+        #     tmp_scans = np.transpose(tmp_scans, (0, 2, 1))  # (256, 256, 2)
+        # if tmp_scans.shape == (256, 3, 256):
+        #     tmp_scans = np.transpose(tmp_scans, (0, 2, 1))  # (256, 256, 2)
 
-        # If shape is (2, 256, 256), swap axes to (256, 256, 2)
-        elif tmp_scans.shape == (2, 256, 256):
-            tmp_scans = np.transpose(tmp_scans, (1, 2, 0))  # (256, 256, 2)
+        # # If shape is (2, 256, 256), swap axes to (256, 256, 2)
+        # elif tmp_scans.shape == (2, 256, 256):
+        #     tmp_scans = np.transpose(tmp_scans, (1, 2, 0))  # (256, 256, 2)
         if self.cfg.data.normalize:
             tmp_scans = util.norm_img(tmp_scans, self.cfg.data.norm_perc)
         pad_h, pad_w = max(0, x - tmp_scans.shape[0]), max(0, y - tmp_scans.shape[1])      
@@ -455,9 +485,7 @@ class mpl_trainer(nn.Module):
             # print("patch shape:", patch.shape)
             if len(patch.shape) == 3: 
                 patch = patch[:,:,0]
-            ipt = torch.from_numpy(patch).to(dtype=torch.float).cuda()
-                
-            
+            ipt = torch.from_numpy(patch).to(dtype=torch.float).cuda()                            
             ipt = ipt.reshape((1, 1,) + ipt.shape)
 
             patch_idx = tmp_idx[idx]
@@ -521,9 +549,14 @@ class mpl_trainer(nn.Module):
             for val_file in val_lst:
                 val_scan = nib.load(os.path.join(
                     self.cfg.data.val_img, val_file))
+                # val_label = nib.load(os.path.join(
+                #     self.cfg.data.val_label, val_file.replace(
+                # '_te1.nii.gz', '_ref_mask.nii.gz') ))
+
                 val_label = nib.load(os.path.join(
                     self.cfg.data.val_label, val_file.replace(
-                '_te1.nii.gz', '_ref_mask.nii.gz') ))
+                        '_te1_split', '_ref_mask_split') ))
+                        
                 tar_orientation = ('R', 'A', 'S')
                 if nib.aff2axcodes(val_scan.affine) == tar_orientation:
                     tmp_scans = val_scan.get_fdata()
@@ -536,30 +569,29 @@ class mpl_trainer(nn.Module):
 
                 tmp_scans = np.squeeze(tmp_scans)
                 tmp_label = np.squeeze(tmp_label)
-                # If shape is (256, 3, 256), squeeze or take first dimension
-                if len(tmp_label.shape) == 3 and tmp_label.shape[-1] == 256:
-                    tmp_label = np.transpose(tmp_label, (0, 2, 1))  # Convert (256,3,256) → (256,256,3)
+                # # If shape is (256, 3, 256), squeeze or take first dimension
+                # if len(tmp_label.shape) == 3 and tmp_label.shape[-1] == 256:
+                #     tmp_label = np.transpose(tmp_label, (0, 2, 1))  # Convert (256,3,256) → (256,256,3)
 
-                # If shape is (256, 2, 256), swap axes to (256, 256, 2)
-                if tmp_label.shape == (256, 2, 256):
-                    tmp_label = np.transpose(tmp_label, (0, 2, 1))  # (256, 256, 2)
+                # # If shape is (256, 2, 256), swap axes to (256, 256, 2)
+                # if tmp_label.shape == (256, 2, 256):
+                #     tmp_label = np.transpose(tmp_label, (0, 2, 1))  # (256, 256, 2)
 
-                # If shape is (2, 256, 256), swap axes to (256, 256, 2)
-                elif tmp_label.shape == (2, 256, 256):
-                    tmp_label = np.transpose(tmp_label, (1, 2, 0))  # (256, 256, 2)
+                # # If shape is (2, 256, 256), swap axes to (256, 256, 2)
+                # elif tmp_label.shape == (2, 256, 256):
+                #     tmp_label = np.transpose(tmp_label, (1, 2, 0))  # (256, 256, 2)
 
-                # If shape is (256, 256, 2), take the first channel
-                if tmp_label.shape == (256, 256, 2):
-                    tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
-                if tmp_label.shape == (256, 256, 3):
-                    tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
+                # # If shape is (256, 256, 2), take the first channel
+                # if tmp_label.shape == (256, 256, 2):
+                #     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
+                # if tmp_label.shape == (256, 256, 3):
+                #     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
                     
                 if tmp_label.shape == (256, 256, 1):
                     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
                 tmp_scans[tmp_scans < 0] = 0
 
-                tmp_pred = self.infer_single_scan(tmp_scans)
-                
+                tmp_pred = self.infer_single_scan(tmp_scans)                
                 ind_dsc = []
                 for cls_idx in range(1, self.cfg.train.cls_num):
                     ind_dsc.append(util.cal_dice(tmp_pred, tmp_label, cls_idx))
@@ -579,7 +611,7 @@ class mpl_trainer(nn.Module):
             self.val_dice.append(cur_dsc)
 
             tmp_val_score = cur_dsc * 1 - self.tgt_pse_seg_loss[-1]*0.5
-
+            torch.cuda.empty_cache()
         else:
             self.val_dice.append(0)
             tmp_val_score = - self.tgt_pse_seg_loss[-1]

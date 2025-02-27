@@ -23,7 +23,7 @@ class MAE_CNN(nn.Module):
                                              num_groups=32)
 
         # upsample
-        self.local_upsample = nn.ConvTranspose3d(in_channels=embed_dim, out_channels=decoder_embed_dim, kernel_size=4,
+        self.local_upsample = nn.ConvTranspose2d(in_channels=embed_dim, out_channels=decoder_embed_dim, kernel_size=4,
                                                  stride=4)
 
         # decoder
@@ -33,39 +33,41 @@ class MAE_CNN(nn.Module):
                                           conv_padding=0, layer_order='gcr', num_groups=8)
 
         # norm layers
-        self.final_projection_local_recon = nn.Conv3d(
+        self.final_projection_local_recon = nn.Conv2d(
             in_channels=16, out_channels=1, kernel_size=3, padding=1)
         self.final_norm_local_recon = nn.GroupNorm(
             num_groups=8, num_channels=16)
 
-        self.avgpool = nn.AdaptiveAvgPool3d((3, 1, 1))
+        self.avgpool = nn.AdaptiveAvgPool2d((3, 1))  # 2D pooling
 
     def patchify(self, imgs, p):
         """
 
-        imgs: (N, 1, H, W, D)
-        x: (N, H*W*D/P***3, patch_size**3)
+        imgs: (N, 1, H, W)
+        Returns: (N, H*W/P^2, P^2)
         """
-        assert imgs.shape[2] % p == 0 and imgs.shape[3] % p == 0 and imgs.shape[4] % p == 0
-        h, w, d = [i//p for i in self.cfg.data.patch_size]
+        assert imgs.shape[2] % p == 0 and imgs.shape[3] % p == 0
+        h, w = [i // p for i in self.cfg.data.patch_size[:2]]
+        # print(imgs.shape)
+        x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
+        x = torch.einsum('nchpwq->nhwpqc', x)
+        x = x.reshape(shape=(imgs.shape[0], h * w, p ** 2))
 
-        x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p, d, p))
-        x = torch.einsum('nchpwqdr->nhwdpqrc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w * d, p ** 3))
         return x
+
 
     def unpatchify(self, x, p):
         """
 
-        x: (N, H*W*D/P***3, patch_size**3)
-        imgs: (N, 1, H, W, D)
+        x: (N, H*W/P^2, P^2)
+        Returns: (N, 1, H, W)
         """
-        h, w, d = [i//p for i in self.cfg.data.patch_size]
-        assert h * w * d == x.shape[1]
+        h, w = [i // p for i in self.cfg.data.patch_size[:2]]
+        assert h * w == x.shape[1]
 
-        x = x.reshape(shape=(x.shape[0], h, w, d, p, p, p))
-        x = torch.einsum('nhwdpqr->nhpwqdr', x)
-        imgs = x.reshape(shape=(x.shape[0], 1, h * p, w * p, d * p))
+        x = x.reshape(shape=(x.shape[0], h, w, p, p))
+        x = torch.einsum('nhwpq->nhpwq', x)
+        imgs = x.reshape(shape=(x.shape[0], 1, h * p, w * p))
         return imgs
 
     def random_masking(self, x, mask_ratio, p):

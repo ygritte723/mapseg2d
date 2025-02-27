@@ -32,13 +32,23 @@ def tensor2im(image_tensor, imtype=np.uint8, normalize=False):
             image_numpy.append(tensor2im(image_tensor[i], imtype, normalize))
         return image_numpy
     image_numpy = image_tensor.cpu().float().numpy()
+    # Ensure at least 3 dimensions (batch, height, width) -> (H, W) or (H, W, C)
+    if image_numpy.ndim == 3 and image_numpy.shape[0] in {1, 3}:  # (C, H, W)
+        image_numpy = np.transpose(image_numpy, (1, 2, 0))  # Convert to (H, W, C)
+    
+    # Normalize if required
     if normalize:
-        image_numpy = (np.transpose(image_numpy, (1, 2, 0)) + 1) / 2.0 * 255.0
+        image_numpy = (image_numpy + 1) / 2.0 * 255.0  # Normalize to [0, 255]
     else:
-        image_numpy = np.transpose(image_numpy, (1, 2, 0)) * 255.0
+        image_numpy = image_numpy * 255.0  # Scale directly
+
+    # Clip values to valid image range
     image_numpy = np.clip(image_numpy, 0, 255)
-    if image_numpy.shape[2] == 1 or image_numpy.shape[2] > 3:
-        image_numpy = image_numpy[:, :, 0]
+
+    # If single-channel grayscale, remove extra dimension to make it (H, W)
+    if image_numpy.shape[-1] == 1:
+        image_numpy = image_numpy[:, :, 0]  # Convert (H, W, 1) -> (H, W)
+
     return image_numpy.astype(imtype)
 
 # Converts a one-hot tensor into a colorful label map
@@ -201,7 +211,8 @@ def get_bounds(img):
 
 
 def patch_slicer(scan, mask, patch_size, stride, remove_bg=True, test=False, ori_path=None):
-    x, y, z = scan.shape
+    x, y = scan.shape[0], scan.shape[1]
+    
     scan_patches = []
     mask_patches = []
     if test:
@@ -214,17 +225,14 @@ def patch_slicer(scan, mask, patch_size, stride, remove_bg=True, test=False, ori
         x2 = bound[1]
         y1 = bound[2]
         y2 = bound[3]
-        z1 = bound[4]
-        z2 = bound[5]
     else:
         x1 = 0
         x2 = x
         y1 = 0
         y2 = y
-        z1 = 0
-        z2 = z
+
     p1, p2, p3 = patch_size
-    s1, s2, s3 = stride
+    s1, s2 = stride
 
     if x2 - x1 < p1:
         if x2-p1 > 0:
@@ -238,29 +246,21 @@ def patch_slicer(scan, mask, patch_size, stride, remove_bg=True, test=False, ori
         else:
             y1 = 0
             y2 = p2
-    if z2 - z1 < p3:
-        if z2-p3 > 0:
-            z1 = z2-p3
-        else:
-            z1 = 0
-            z2 = p3
 
     x_stpes = _gen_indices(x1, x2, p1, s1)
     for x_idx in x_stpes:
         y_steps = _gen_indices(y1, y2, p2, s2)
         for y_idx in y_steps:
-            z_steps = _gen_indices(z1, z2, p3, s3)
-            for z_idx in z_steps:
                 tmp_scan = scan[x_idx:x_idx + p1,
-                                y_idx:y_idx + p2, z_idx:z_idx + p3]
+                                y_idx:y_idx + p2]
                 tmp_label = mask[x_idx:x_idx + p1,
-                                 y_idx:y_idx + p2, z_idx:z_idx + p3]
+                                 y_idx:y_idx + p2]
                 scan_patches.append(tmp_scan)
                 mask_patches.append(tmp_label)
                 if test:
                     file_path.append(ori_path)
                     patch_idx.append(
-                        [x_idx, x_idx + p1, y_idx, y_idx + p2, z_idx, z_idx + p3])
+                        [x_idx, x_idx + p1, y_idx, y_idx + p2])
     if not test:
         return scan_patches, mask_patches
     else:

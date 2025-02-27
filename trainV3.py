@@ -2,7 +2,7 @@ from cfg.default import get_cfg_defaults
 import wandb
 import torch
 import numpy as np
-from model.solver import get_solver
+from model.solverV3 import get_solver
 from data.get_dataloader import get_dataloader
 import time
 import os

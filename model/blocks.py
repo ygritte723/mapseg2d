@@ -17,15 +17,15 @@ class DeepLabHead(nn.Module):
 
         self.classifier = nn.Sequential(
             ASPP(in_channels, aspp_channel, aspp_dilate),
-            nn.ConvTranspose3d(in_channels=aspp_channel, out_channels=int(aspp_channel / 8), kernel_size=ratio,
+            nn.ConvTranspose2d(in_channels=aspp_channel, out_channels=int(aspp_channel / 8), kernel_size=ratio,
                                stride=ratio),
             nn.GroupNorm(num_groups=8, num_channels=int(aspp_channel / 8)),
             nn.ReLU(inplace=True),
-            nn.Conv3d(int(aspp_channel / 8), int(aspp_channel / 8),
+            nn.Conv2d(int(aspp_channel / 8), int(aspp_channel / 8),
                       3, padding=1, bias=False),
             nn.GroupNorm(num_groups=8, num_channels=int(aspp_channel / 8)),
             nn.ReLU(inplace=True),
-            nn.Conv3d(int(aspp_channel / 8), num_classes, 1)
+            nn.Conv2d(int(aspp_channel / 8), num_classes, 1)
         )
         self._init_weight()
 
@@ -34,7 +34,7 @@ class DeepLabHead(nn.Module):
 
     def _init_weight(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv3d):
+            if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight)
             elif isinstance(m, nn.GroupNorm):
                 nn.init.constant_(m.weight, 1)
@@ -50,10 +50,10 @@ class AtrousSeparableConvolution(nn.Module):
         super(AtrousSeparableConvolution, self).__init__()
         self.body = nn.Sequential(
             # Separable Conv
-            nn.Conv3d(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding,
+            nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding,
                       dilation=dilation, bias=bias, groups=in_channels),
             # PointWise Conv
-            nn.Conv3d(in_channels, out_channels, kernel_size=1,
+            nn.Conv2d(in_channels, out_channels, kernel_size=1,
                       stride=1, padding=0, bias=bias),
         )
 
@@ -64,7 +64,7 @@ class AtrousSeparableConvolution(nn.Module):
 
     def _init_weight(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv3d):
+            if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight)
             elif isinstance(m, nn.GroupNorm):
                 nn.init.constant_(m.weight, 1)
@@ -74,7 +74,7 @@ class AtrousSeparableConvolution(nn.Module):
 class ASPPConv(nn.Sequential):
     def __init__(self, in_channels, out_channels, dilation):
         modules = [
-            nn.Conv3d(in_channels, out_channels, 3, padding=dilation,
+            nn.Conv2d(in_channels, out_channels, 3, padding=dilation,
                       dilation=dilation, bias=False),
             nn.GroupNorm(num_groups=8, num_channels=out_channels),
             nn.ReLU(inplace=True)
@@ -85,15 +85,15 @@ class ASPPConv(nn.Sequential):
 class ASPPPooling(nn.Sequential):
     def __init__(self, in_channels, out_channels):
         super(ASPPPooling, self).__init__(
-            nn.AdaptiveAvgPool3d(1),
-            nn.Conv3d(in_channels, out_channels, 1, bias=False),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.GroupNorm(num_groups=8, num_channels=out_channels),
             nn.ReLU(inplace=True))
 
     def forward(self, x):
-        size = x.shape[-3:]
+        size = x.shape[-2:]
         x = super(ASPPPooling, self).forward(x)
-        return F.interpolate(x, size=size, mode='trilinear', align_corners=False)
+        return F.interpolate(x, size=size, mode='bilinear', align_corners=False)
 
 
 class ASPP(nn.Module):
@@ -102,7 +102,7 @@ class ASPP(nn.Module):
         out_channels = aspp_channel
         modules = []
         modules.append(nn.Sequential(
-            nn.Conv3d(in_channels, out_channels, 1, bias=False),
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
             nn.GroupNorm(num_groups=8, num_channels=out_channels),
             nn.ReLU(inplace=True)))
 
@@ -115,7 +115,7 @@ class ASPP(nn.Module):
         self.convs = nn.ModuleList(modules)
 
         self.project = nn.Sequential(
-            nn.Conv3d(5 * out_channels, out_channels, 1, bias=False),
+            nn.Conv2d(5 * out_channels, out_channels, 1, bias=False),
             nn.GroupNorm(num_groups=8, num_channels=out_channels),
             nn.ReLU(inplace=True),
             nn.Dropout(0.1), )
@@ -155,6 +155,8 @@ def _ntuple(n):
 
 def conv3d(in_channels, out_channels, kernel_size, stride_size, bias, padding):
     return nn.Conv3d(in_channels, out_channels, kernel_size, stride=stride_size, bias=bias, padding=padding)
+def conv2d(in_channels, out_channels, kernel_size, stride_size, bias, padding):
+    return nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride_size, bias=bias, padding=padding)
 
 
 def create_conv(in_channels, out_channels, kernel_size, stride_size, order, num_groups, padding):
@@ -192,7 +194,7 @@ def create_conv(in_channels, out_channels, kernel_size, stride_size, order, num_
         elif char == 'c':
             # add learnable bias only in the absence of batchnorm/groupnorm
             bias = not ('g' in order or 'b' in order)
-            modules.append(('conv', conv3d(in_channels, out_channels,
+            modules.append(('conv', conv2d(in_channels, out_channels,
                            kernel_size, stride_size, bias, padding)))
         elif char == 'g':
             is_before_conv = i < order.index('c')
@@ -211,9 +213,9 @@ def create_conv(in_channels, out_channels, kernel_size, stride_size, order, num_
         elif char == 'b':
             is_before_conv = i < order.index('c')
             if is_before_conv:
-                modules.append(('batchnorm', nn.BatchNorm3d(in_channels)))
+                modules.append(('batchnorm', nn.BatchNorm2d(in_channels)))
             else:
-                modules.append(('batchnorm', nn.BatchNorm3d(out_channels)))
+                modules.append(('batchnorm', nn.BatchNorm2d(out_channels)))
         else:
             raise ValueError(
                 f"Unsupported layer type '{char}'. MUST be one of ['b', 'g', 'r', 'l', 'e', 'c']")
@@ -590,7 +592,7 @@ class TransposeConvUpsampling(AbstractUpsampling):
 
     def __init__(self, in_channels=None, out_channels=None, kernel_size=3, scale_factor=(2, 2, 2)):
         # make sure that the output size reverses the MaxPool3d from the corresponding encoder
-        upsample = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=kernel_size, stride=scale_factor,
+        upsample = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=kernel_size, stride=scale_factor,
                                       padding=1)
         super().__init__(upsample)
 
