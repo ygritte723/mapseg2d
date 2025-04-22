@@ -4,118 +4,129 @@ from .data_utils import *
 import torchio as tio
 import torch
 import numpy as np
+import random
 
 
 class mae_dataset(data.Dataset):
     def __init__(self, cfg):
         self.cfg = cfg
+        self.patch_size = cfg.data.patch_size  # (x, y, z)
+        self.aug_prob   = cfg.data.aug_prob
+        self.normalize  = cfg.data.normalize
+        self.norm_perc  = cfg.data.norm_perc
+        self.remove_bg  = cfg.data.remove_bg
         # get all image paths (source and target)
         # folder should end with '_train'
-        all_img = 0
-        candidate_dir = list_mae_domains(cfg.data.mae_root)
+        
+        # 1) build domain→scan‑paths dict
+        self._build_path_index()
+        
+        # 2) prepare torchio transforms once
+        self.affine = tio.RandomAffine(
+            p=self.aug_prob,
+            scales=(0.75, 1.5),
+            degrees=40,
+            isotropic=False,
+            default_pad_value=0,
+            image_interpolation='linear'
+        )
+        self.resize = tio.transforms.Resize(target_shape=(self.patch_size[0],
+                                                         self.patch_size[1],
+                                                         1))        
+    def _build_path_index(self):
+        self.path_dict = {}
+        total = 0
+        for i, domain in enumerate(list_mae_domains(self.cfg.data.mae_root)):
+            scans = sorted(list_scans(domain, self.cfg.data.extension))
+            self.path_dict[i] = scans
+            total += len(scans)
 
-        self.path_dic = {}
-        for i in range(len(candidate_dir)):
-            self.path_dic[str(i)] = sorted(
-                list_scans(candidate_dir[i], self.cfg.data.extension))
-            all_img += len(self.path_dic[str(i)])
-        self.num_domain = len(candidate_dir)
-        print('num of mae domains: '+str(self.num_domain))
-        print('num of mae scans: ' + str(all_img))
-
-        self.all_img = all_img
-
-    def __getitem__(self, index):
-        idx = int(np.random.random_sample() // (1 / self.num_domain))
-        tmp_path = self.path_dic[str(idx)]
-        index = np.random.randint(0, len(tmp_path))
-        # index = index % len(tmp_path)
-        # scans should be first warped to the RAS space
-        # see preprocessing for more details
-        tmp_scans = nib.load(tmp_path[index])
-        tmp_scans = np.squeeze(tmp_scans.get_fdata())
-        tmp_scans[tmp_scans < 0] = 0
-        tmp_scans = random_flip(tmp_scans)
-
-        # normalization
-        # we do a little trick to normalize the scan at random percentile
-        if self.cfg.data.normalize:
-            if np.random.uniform() <= self.cfg.data.aug_prob:
-                perc_dif = 100-self.cfg.data.norm_perc
-                tmp_scans = norm_img(tmp_scans, np.random.uniform(
-                    self.cfg.data.norm_perc-perc_dif, 100))
-            else:
-                tmp_scans = norm_img(tmp_scans, self.cfg.data.norm_perc)
-
-        # whether to pad the image to match the patch size
-        # and then cast to torch.tensor
-        # print(tmp_scans.shape)
-        x, y, z = self.cfg.data.patch_size
-        pad_h, pad_w = max(0, x - tmp_scans.shape[0]), max(0, y - tmp_scans.shape[1])
-        # print(pad_h, pad_w)
-        # if min(tmp_scans.shape) < min(x, y, z):
-        #     x_diff = x-tmp_scans.shape[0]
-        #     y_diff = y-tmp_scans.shape[1]
-        #     z_diff = z-tmp_scans.shape[2]
-        #     tmp_scans = np.pad(tmp_scans, ((max(0, int(x_diff/2)), max(0, x_diff-int(x_diff/2))), (max(0, int(
-        #         y_diff/2)), max(0, y_diff-int(y_diff/2))), (max(0, int(z_diff/2)), max(0, z_diff-int(z_diff/2)))), constant_values=1e-4)  # cant pad with 0s, otherwise the local and global patches wont be the same location
-        #     tmp_scans = torch.unsqueeze(torch.from_numpy(tmp_scans), 0)
-        # else:
-        #     tmp_scans = torch.unsqueeze(torch.from_numpy(tmp_scans), 0)
-        if pad_h > 0 or pad_w > 0:
-            tmp_scans = np.pad(tmp_scans, ((pad_h // 2, pad_h - pad_h // 2), (pad_w // 2, pad_w - pad_w // 2),(0,0),), 
-                         constant_values=1e-4)  # Avoid zero-padding
-        tmp_scans = np.expand_dims(tmp_scans, axis=-1)
-
-        tmp_scans = torch.unsqueeze(torch.from_numpy(tmp_scans), 0)
-        # print(tmp_scans.shape)
-        # if len(tmp_scans.shape) == 3:
-        # # Add a missing dimension (e.g., batch/channel dimension)
-        #     tmp_scans = tmp_scans.unsqueeze(0)  # Adds a dimension at index 0
-        if len(tmp_scans.shape) != 4:
-            return self.__getitem__((index + 1) % len(self))  # Try next valid sample
-
-
-        _, x1, y1, z1 = tmp_scans.shape
-        # _, x1, y1 = tmp_scans.shape
-        transforms = tio.RandomAffine(p=self.cfg.data.aug_prob, scales=(0.75, 1.5), degrees=40,
-                                      isotropic=False,
-                                      default_pad_value=0, image_interpolation='linear')
-        tmp_scans = transforms(tmp_scans)
-
-        # if remove_bg, the patch will only be sampled from the foreground (non-zero) region
-
-        bound = get_bounds(tmp_scans.data)
-        x1, y1, _ = tmp_scans.shape[1:]  # Get updated shape
-
-        if self.cfg.data.remove_bg:
-            x_idx = max(0, min(np.random.randint(bound[0], bound[1] - x), x1 - x))
-            y_idx = max(0, min(np.random.randint(bound[2], bound[3] - y), y1 - y))
+        self.num_domains = len(self.path_dict)
+        self.length = min(len(v) for v in self.path_dict.values())
+        print(f'→ {self.num_domains} domains, {total} scans in total')
+        
+    def _load_and_norm(self, path):
+        arr = nib.load(path).get_fdata().squeeze()
+        arr = np.clip(arr, 0, None)
+        arr = random_flip(arr)
+        if self.normalize and random.random() < self.aug_prob:
+            low = self.norm_perc * 0.5
+            p   = random.uniform(low, 100.0)
+            arr = norm_img(arr, p)
         else:
-            x_idx = np.random.randint(0, x1 - x) if x1 - x > 0 else 0
-            y_idx = np.random.randint(0, y1 - y) if y1 - y > 0 else 0
+            arr = norm_img(arr, self.norm_perc)
+        return self._pad_to_patch(arr)
+    
+    def __getitem__(self, _):
+        # 1) pick a random index *once*
+        idx = random.randrange(len(self))
 
-        # location indicates the sampled patch location
-        location = torch.zeros_like(tmp_scans.data)
-        location[:, x_idx:x_idx + x, y_idx:y_idx + y, ] = 1
-
-        sbj = tio.Subject(one_image=tio.ScalarImage(tensor=tmp_scans.data[:, bound[0]:bound[1], bound[2]:bound[3], :]))
-        transforms = tio.transforms.Resize(target_shape=(x, y, 1))
-        sbj = transforms(sbj)
-        down_scan = sbj['one_image'].data[:,:, :,0]
-        # print(down_scan.shape)
-
-        input_dict = {'local_patch': tmp_scans.data[:, x_idx:x_idx + x, y_idx:y_idx + y, 0],
-                      'global_images': down_scan}
+        # 2) pick one distinct domain
+        d1 = random.randrange(self.num_domains)
 
 
-        return input_dict
+        # 3) fetch the *same* idx from each
+        p1 = self.path_dict[d1][idx]
+
+        # 4) load, preprocess, augment, extract patches exactly as before
+        scan1 = self._load_and_norm(p1)
+        t1 = torch.from_numpy(scan1).unsqueeze(0)
+        t1 = self.affine(t1)
+        local1, global1 = self._extract_patches(t1)
+
+        return {
+            'local_patch': local1,
+            'global_img':  global1,
+        }
+
+    def _pad_to_patch(self, scan: np.ndarray) -> np.ndarray:
+        x, y, _ = self.patch_size
+        h, w    = scan.shape[:2]
+        pad_h   = max(0, x - h)
+        pad_w   = max(0, y - w)
+        if pad_h or pad_w:
+            pad = (
+                (pad_h//2, pad_h - pad_h//2),
+                (pad_w//2, pad_w - pad_w//2),
+                (0, 0)
+            )
+            scan = np.pad(scan, pad, constant_values=1e-4)
+        return scan
+
+    def _extract_patches(self, scan: torch.Tensor):
+        _, H, W, Z = scan.shape
+        x, y, z   = self.patch_size
+
+        # pick a slice at random
+        sl = random.randrange(Z)
+        slice_2d = scan[0, :, :, sl]  # [H, W]
+
+        # compute foreground bounds if requested
+        bound = get_bounds(slice_2d)
+        max_x = H - x
+        max_y = W - y
+
+        if self.remove_bg:
+            x0 = np.clip(random.randint(bound[0], bound[1] - x), 0, max_x)
+            y0 = np.clip(random.randint(bound[2], bound[3] - y), 0, max_y)
+        else:
+            x0 = random.randint(0, max_x) if max_x > 0 else 0
+            y0 = random.randint(0, max_y) if max_y > 0 else 0
+
+        # local patch
+        local = slice_2d[x0:x0+x, y0:y0+y].unsqueeze(0)  # [1, x, y]
+
+        # downsample the full slice
+        subject = tio.Subject(
+            image=tio.ScalarImage(tensor=slice_2d.unsqueeze(0).unsqueeze(-1))
+        )
+        subject = self.resize(subject)
+        global_img = subject['image'].data[:, :, :, 0]     # [1, H', W']
+
+        return local, global_img
 
     def __len__(self):
-        # we used fixed 2000 as the number of samples in each epoch
-        # one can choose max(2000, self.all_img)
-        # return max(2000, self.all_img)
-        return 2000
+        return 2000  # or: return max(2000, total_scans)
 
 
 class mpl_dataset(data.Dataset):
@@ -398,3 +409,156 @@ class mpl_dataset(data.Dataset):
         # we used fixed 100 steps for each epoch in finetuning
         # THIS PARAM WAS NEVER TUNED
         return 100
+
+class mae_dataset_s(data.Dataset):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.patch_size = cfg.data.patch_size  # (x, y, z)
+        self.aug_prob   = cfg.data.aug_prob
+        self.normalize  = cfg.data.normalize
+        self.norm_perc  = cfg.data.norm_perc
+        self.remove_bg  = cfg.data.remove_bg
+        # get all image paths (source and target)
+        # folder should end with '_train'
+        
+        # 1) build domain→scan‑paths dict
+        self._build_path_index()
+        
+        # 2) prepare torchio transforms once
+        self.affine = tio.RandomAffine(
+            p=self.aug_prob,
+            scales=(0.75, 1.5),
+            degrees=40,
+            isotropic=False,
+            default_pad_value=0,
+            image_interpolation='linear'
+        )
+        self.resize = tio.transforms.Resize(target_shape=(self.patch_size[0],
+                                                         self.patch_size[1],
+                                                         1))        
+    def _build_path_index(self):
+        self.path_dict = {}
+        total = 0
+        for i, domain in enumerate(list_mae_domains(self.cfg.data.mae_root)):
+            scans = sorted(list_scans(domain, self.cfg.data.extension))
+            self.path_dict[i] = scans
+            total += len(scans)
+
+        self.num_domains = len(self.path_dict)
+        self.length = min(len(v) for v in self.path_dict.values())
+        print(f'→ {self.num_domains} domains, {total} scans in total')
+        
+    def _load_and_norm(self, path):
+        arr = nib.load(path).get_fdata().squeeze()
+        arr = np.clip(arr, 0, None)
+        arr = random_flip(arr)
+        if self.normalize and random.random() < self.aug_prob:
+            low = self.norm_perc * 0.5
+            p   = random.uniform(low, 100.0)
+            arr = norm_img(arr, p)
+        else:
+            arr = norm_img(arr, self.norm_perc)
+        return self._pad_to_patch(arr)
+    
+    def __getitem__(self, _):
+        # 1) pick a random index *once*
+        idx = random.randrange(self.length)
+
+        # 2) pick two distinct domains
+        d1 = random.randrange(self.num_domains)
+        d2 = random.randrange(self.num_domains)
+        while d2 == d1:
+            d2 = random.randrange(self.num_domains)
+
+        # 3) fetch the *same* idx from each
+        p1 = self.path_dict[d1][idx]
+        p2 = self.path_dict[d2][idx]
+        # print(f'→ {d1} {p1}  {d2} {p2}')
+
+        # 4) load, preprocess, augment, extract patches exactly as before
+        scan1 = self._load_and_norm(p1)
+        scan2 = self._load_and_norm(p2)
+        
+        t1, t2 = torch.from_numpy(scan1).unsqueeze(0), torch.from_numpy(scan2).unsqueeze(0)
+        
+        # --- before transform: make (C, H, W) → (C, H, W, 1)
+        t1 = t1.unsqueeze(-1)
+        t2 = t2.unsqueeze(-1)
+
+
+        # 2) put into one subject:
+        subject = tio.Subject(
+            img1=tio.ScalarImage(tensor=t1),
+            img2=tio.ScalarImage(tensor=t2),
+        )
+        subject = self.affine(subject)
+        t1, t2 = subject['img1'].data, subject['img2'].data  # still [1,H,W,1]
+        # # --- after transform: squeeze back to (C, H, W)
+        # t1 = t1.squeeze(-1)
+        # t2 = t2.squeeze(-1)
+        # pick slice and (x0,y0) once:
+        
+        # Z = t1.shape[-1]
+        # sl = random.randrange(Z)
+        # bound = get_bounds(t1[0,:,:,sl])
+        # x0, y0 = sample_xy(bound, H, W, x_patch, y_patch, remove_bg)
+        
+        local1, global1 = self._extract_patches(t1)
+        local2, global2 = self._extract_patches(t2)
+
+        return {
+            'local_patch1': local1,
+            'global_img1':  global1,
+            'local_patch2': local2,
+            'global_img2':  global2,
+        }
+
+    def _pad_to_patch(self, scan: np.ndarray) -> np.ndarray:
+        x, y, _ = self.patch_size
+        h, w    = scan.shape[:2]
+        pad_h   = max(0, x - h)
+        pad_w   = max(0, y - w)
+        if pad_h or pad_w:
+            pad = (
+                (pad_h//2, pad_h - pad_h//2),
+                (pad_w//2, pad_w - pad_w//2),
+                (0, 0)
+            )
+            scan = np.pad(scan, pad, constant_values=1e-4)
+        return scan
+
+    def _extract_patches(self, scan: torch.Tensor):
+        _, H, W, Z = scan.shape
+        x, y, z   = self.patch_size
+
+        # pick a slice at random
+        sl = random.randrange(Z)
+        slice_2d = scan[0, :, :, sl]  # [H, W]
+
+        # compute foreground bounds if requested
+        bound = get_bounds(slice_2d)
+        max_x = H - x
+        max_y = W - y
+
+        if self.remove_bg:
+            x0 = np.clip(random.randint(bound[0], bound[1] - x), 0, max_x)
+            y0 = np.clip(random.randint(bound[2], bound[3] - y), 0, max_y)
+        else:
+            x0 = random.randint(0, max_x) if max_x > 0 else 0
+            y0 = random.randint(0, max_y) if max_y > 0 else 0
+
+        # local patch
+        local = slice_2d[x0:x0+x, y0:y0+y].unsqueeze(0)  # [1, x, y]
+
+        # downsample the full slice
+        subject = tio.Subject(
+            image=tio.ScalarImage(tensor=slice_2d.unsqueeze(0).unsqueeze(-1))
+        )
+        subject = self.resize(subject)
+        global_img = subject['image'].data[:, :, :, 0]     # [1, H', W']
+
+        return local, global_img
+
+    def __len__(self):
+        return 2000  # or: return max(2000, total_scans)
+
