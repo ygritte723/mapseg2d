@@ -59,8 +59,7 @@ class mae_dataset(data.Dataset):
     
     def __getitem__(self, _):
         # 1) pick a random index *once*
-        idx = random.randrange(len(self))
-
+        idx = random.randrange(self.length)
         # 2) pick one distinct domain
         d1 = random.randrange(self.num_domains)
 
@@ -70,7 +69,7 @@ class mae_dataset(data.Dataset):
 
         # 4) load, preprocess, augment, extract patches exactly as before
         scan1 = self._load_and_norm(p1)
-        t1 = torch.from_numpy(scan1).unsqueeze(0)
+        t1 = torch.from_numpy(scan1).unsqueeze(0).unsqueeze(-1)  # Ensure shape is (C, H, W, Z)
         t1 = self.affine(t1)
         local1, global1 = self._extract_patches(t1)
 
@@ -96,7 +95,7 @@ class mae_dataset(data.Dataset):
     def _extract_patches(self, scan: torch.Tensor):
         _, H, W, Z = scan.shape
         x, y, z   = self.patch_size
-
+        # print('scan shape: ', scan.shape)
         # pick a slice at random
         sl = random.randrange(Z)
         slice_2d = scan[0, :, :, sl]  # [H, W]
@@ -107,8 +106,13 @@ class mae_dataset(data.Dataset):
         max_y = W - y
 
         if self.remove_bg:
-            x0 = np.clip(random.randint(bound[0], bound[1] - x), 0, max_x)
-            y0 = np.clip(random.randint(bound[2], bound[3] - y), 0, max_y)
+            if (bound[1] - bound[0] < x) or (bound[3] - bound[2] < y):
+                # fallback to random position instead of foreground
+                x0 = random.randint(0, max_x) if max_x > 0 else 0
+                y0 = random.randint(0, max_y) if max_y > 0 else 0
+            else:
+                x0 = np.clip(random.randint(bound[0], bound[1] - x), 0, max_x)
+                y0 = np.clip(random.randint(bound[2], bound[3] - y), 0, max_y)
         else:
             x0 = random.randint(0, max_x) if max_x > 0 else 0
             y0 = random.randint(0, max_y) if max_y > 0 else 0
@@ -122,7 +126,8 @@ class mae_dataset(data.Dataset):
         )
         subject = self.resize(subject)
         global_img = subject['image'].data[:, :, :, 0]     # [1, H', W']
-
+        # print('global_img shape: ', global_img.shape)   
+        # print('local shape: ', local.shape)
         return local, global_img
 
     def __len__(self):
