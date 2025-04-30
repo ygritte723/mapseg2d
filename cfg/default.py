@@ -60,6 +60,9 @@ _c.train.test_time = False
 # how many of epochs without improvement will stop the trianing
 _c.train.patience = 50
 
+_c.train.s2s2 = False
+_c.train.semantic_weight = 1
+
 _c.data = CN()
 # file extension fo the data
 _c.data.extension = '.nii.gz'

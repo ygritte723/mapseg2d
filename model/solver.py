@@ -83,7 +83,7 @@ class mae_trainer(nn.Module):
         loss.backward()
         self.optimizer.step()
 
-        self.visual_dict = dict(zip(['loca_patch',  'local_mask', 'local_pred', 'global_scan', 'global_mask',  'global_pred'],
+        self.visual_dict = dict(zip(['local_patch',  'local_mask', 'local_pred', 'global_scan', 'global_mask',  'global_pred'],
                                     [data['local_patch'],
                                      local_mask.detach(),
                                      local_pred.detach(),

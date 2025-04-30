@@ -13,6 +13,7 @@ from collections import OrderedDict
 import torchio as tio
 import nibabel as nib
 import random
+
 model_zoo = {
     'mae': MAE_CNN,
     'mpl': EMA_MPL
@@ -36,6 +37,7 @@ class mae_trainer(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.model = model_zoo[cfg.train.type](cfg)
+        self.s2s2   = getattr(cfg.train, 's2s2', False)
         self.model.cuda()
         if self.cfg.model.pretrain_model is not None and self.cfg.model.load_pretrain:
             self.model.load_state_dict(torch.load(
@@ -54,6 +56,9 @@ class mae_trainer(nn.Module):
         # we keep track of loss/val score here
         self.local_loss = []
         self.global_loss = []
+        
+        if self.s2s2:
+            self.semantic_history = []
 
     def _get_epoch(self):
         return len(self.local_loss)
@@ -61,36 +66,106 @@ class mae_trainer(nn.Module):
     def _init_epoch(self):
         self.tmp_local_loss = 0
         self.tmp_global_loss = 0
-
+        if self.s2s2:
+            self.tmp_semantic = 0.0
+            
     def _log_internal_epoch_res(self, steps):
         self.local_loss.append(self.tmp_local_loss/steps)
         self.global_loss.append(self.tmp_global_loss/steps)
-
+        if self.s2s2:
+            self.semantic_history.append(self.tmp_semantic / steps)
+            
     def _get_internal_loss(self):
-        return {'avg_local_MSE': self.local_loss[-1], 'avg_global_MSE': self.global_loss[-1]}
-
+        d = {'avg_local_MSE': self.local_loss[-1], \
+                'avg_global_MSE': self.global_loss[-1]}
+        if self.s2s2:
+            d['avg_semantic_sum'] = self.semantic_history[-1]
+        return d
+    
     def train_step(self, data, epoch):
         self.model.train()
-        local_loss, global_loss, local_pred, global_pred, local_mask, global_mask = \
-            self.model.forward_train(
-                data['local_patch'].float().cuda(), data['global_images'].float().cuda())
-        self.loss_dict = dict(zip(['local_MSE', 'global_MSE', ],
-                                  [local_loss.item(), global_loss.item()]))
-        self.tmp_local_loss += local_loss.item()
-        self.tmp_global_loss += global_loss.item()
-        loss = local_loss + global_loss
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
+        if self.s2s2:
+            # unpack 18-tuple from forward_train
+            (l1, l2,
+             p1, p2,
+             m1, m2,
+             kd_gl,
+             c_gl,
+            #  tb_gl,
+             kd_gp,
+             c_gp,
+             ) = self.model.forward_train(
+                data['local_patch1'].float().cuda(),
+                data['global_img1'].float().cuda(),
+                data['local_patch2'].float().cuda(),
+                data['global_img2'].float().cuda()
+            )
+            # sum all consistency terms
+            semantic_sum = (kd_gl +
+                            c_gl +
+                            # tb_gl +
+                            kd_gp +
+                            c_gp 
+                            # tb_gp
+                            )
+            # weighted total loss
+            total_loss = l1 + l2 + self.cfg.train.semantic_weight * semantic_sum
+            # print("total_loss: ", total_loss.item())
+            # print("semantic sum: ", semantic_sum.item())
+            # record losses
+            self.loss_dict = {
+                'local_MSE':   l1.item(),
+                'global_MSE':  l2.item(),
+                'semantic loss': semantic_sum.item()
+            }
+            self.tmp_local_loss  += l1.item()
+            self.tmp_global_loss += l2.item()
+            self.tmp_semantic    += semantic_sum.item()
+            # backward
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+            # visualize both views
+            self.visual_dict = OrderedDict([
+                ('local1_patch', data['local_patch1']),
+                ('local1_mask',  m1.detach()),
+                ('local1_pred',  p1.detach()),
+                ('global1_img',  data['global_img1']),
+                ('global1_mask', m1.detach()),
+                ('global1_pred', p1.detach()),
+                ('local2_patch', data['local_patch2']),
+                ('local2_mask',  m2.detach()),
+                ('local2_pred',  p2.detach()),
+                ('global2_img',  data['global_img2']),
+                ('global2_mask', m2.detach()),
+                ('global2_pred', p2.detach()),
+            ])
+        else:
+            # original single-view MAE step
+            local_loss, global_loss, local_pred, global_pred, local_mask, global_mask = \
+                self.model.forward_train(
+                    data['local_patch'].float().cuda(),
+                    data['global_img'].float().cuda()
+                )
+            self.loss_dict = {
+                'local_MSE': local_loss.item(),
+                'global_MSE': global_loss.item()
+            }
+            self.tmp_local_loss  += local_loss.item()
+            self.tmp_global_loss += global_loss.item()
+            total_loss = local_loss + global_loss
+            self.optimizer.zero_grad()
+            total_loss.backward()
+            self.optimizer.step()
+            self.visual_dict = OrderedDict([
+                ('local_patch', data['local_patch']),
+                ('local_mask',  local_mask.detach()),
+                ('local_pred',  local_pred.detach()),
+                ('global_scan', data['global_img']),
+                ('global_mask', global_mask.detach()),
+                ('global_pred', global_pred.detach()),
+            ])
 
-        self.visual_dict = dict(zip(['loca_patch',  'local_mask', 'local_pred', 'global_scan', 'global_mask',  'global_pred'],
-                                    [data['local_patch'],
-                                     local_mask.detach(),
-                                     local_pred.detach(),
-                                     data['global_images'],
-                                     global_mask.detach(),
-                                     global_pred.detach()
-                                     ]))
 
     def get_cur_loss(self):
         return self.loss_dict
@@ -266,26 +341,10 @@ class mpl_trainer(nn.Module):
                 seg_loss, seg_loss_masked, seg_loss_aux, seg_loss_aux_masked, cos_feat, cos_feat_masked, pred_seg, pred_seg_masked, pred_aux, mask_seg = \
                     self.model.train_source(cord_src, img_src, label_src,
                                             global_src, label_src_aux, self.cfg.train.mask_ratio)
-                # print("train source: ")
-                # print("seg_loss: ", seg_loss)
-                # print("seg_loss_masked: ", seg_loss_masked)
-                # print("seg_loss_aux: ", seg_loss_aux)
-                # print("seg_loss_aux_masked: ", seg_loss_aux_masked)
-                # print("cos_feat: ", cos_feat)
-                # print("cos_feat_masked: ", cos_feat_masked)
-                # print("pred_seg size: ", pred_seg.shape)
-                # print("pred_seg_masked size: ", pred_seg_masked.shape)
-                # print("pred_aux size: ", pred_aux.shape)
-                # print("mask_seg size: ", mask_seg.shape)
+
                 
                 seg_loss_masked_1, seg_loss_aux_masked_1, cos_feat_masked_1, pred_seg_masked_1, pred_aux_masked_1 = \
                     self.model.train_source_only1(cord_src, img_src, label_src, global_src, label_src_aux, self.cfg.train.mask_ratio)
-                # print("train source only 1: ")
-                # print("seg_loss_masked_1: ", seg_loss_masked_1)
-                # print("seg_loss_aux_masked_1: ", seg_loss_aux_masked_1)
-                # print("cos_feat_masked_1: ", cos_feat_masked_1)
-                # print("pred_seg_masked_1 shape: ", pred_seg_masked_1.shape)
-                # print("pred_aux_masked_1 shape: ", pred_aux_masked_1.shape)
                 
                 seg_loss_masked = (seg_loss_masked + seg_loss_masked_1) * 0.5
                 seg_loss_aux_masked = (seg_loss_aux_masked + seg_loss_aux_masked_1) * 0.5
@@ -569,23 +628,6 @@ class mpl_trainer(nn.Module):
 
                 tmp_scans = np.squeeze(tmp_scans)
                 tmp_label = np.squeeze(tmp_label)
-                # # If shape is (256, 3, 256), squeeze or take first dimension
-                # if len(tmp_label.shape) == 3 and tmp_label.shape[-1] == 256:
-                #     tmp_label = np.transpose(tmp_label, (0, 2, 1))  # Convert (256,3,256) → (256,256,3)
-
-                # # If shape is (256, 2, 256), swap axes to (256, 256, 2)
-                # if tmp_label.shape == (256, 2, 256):
-                #     tmp_label = np.transpose(tmp_label, (0, 2, 1))  # (256, 256, 2)
-
-                # # If shape is (2, 256, 256), swap axes to (256, 256, 2)
-                # elif tmp_label.shape == (2, 256, 256):
-                #     tmp_label = np.transpose(tmp_label, (1, 2, 0))  # (256, 256, 2)
-
-                # # If shape is (256, 256, 2), take the first channel
-                # if tmp_label.shape == (256, 256, 2):
-                #     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
-                # if tmp_label.shape == (256, 256, 3):
-                #     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)
                     
                 if tmp_label.shape == (256, 256, 1):
                     tmp_label = tmp_label[:, :, 0]  # Reduce to (256, 256)

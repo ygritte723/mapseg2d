@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .blocks import create_encoders, ExtResNetBlock, _ntuple, res_decoders
 import numpy as np
+from .lsc_loss import BinaryKDLoss, ConsistencyLoss, KDLoss
 
 
 class MAE_CNN(nn.Module):
@@ -39,6 +40,9 @@ class MAE_CNN(nn.Module):
             num_groups=8, num_channels=16)
 
         self.avgpool = nn.AdaptiveAvgPool2d((3, 1))  # 2D pooling
+        self.kd_loss = BinaryKDLoss(kl_loss_factor=1.)
+        # self.FCB_consist_loss = ConsistencyLoss(loss_factor=1.,feature_dim=1)
+        self.consist_loss = ConsistencyLoss(loss_factor=1.,feature_dim=1)
 
     def patchify(self, imgs, p):
         """
@@ -48,7 +52,8 @@ class MAE_CNN(nn.Module):
         """
         assert imgs.shape[2] % p == 0 and imgs.shape[3] % p == 0
         h, w = [i // p for i in self.cfg.data.patch_size[:2]]
-        # print(imgs.shape)
+        # print('before patchify')
+        # print(imgs.shape) = torch.Size([4, 1, 96, 96])
         x = imgs.reshape(shape=(imgs.shape[0], 1, h, p, w, p))
         x = torch.einsum('nchpwq->nhwpqc', x)
         x = x.reshape(shape=(imgs.shape[0], h * w, p ** 2))
@@ -146,7 +151,11 @@ class MAE_CNN(nn.Module):
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
-    def forward_train(self, local_patch, global_img):
+    def forward_train(self,
+                      local_patch, global_img,
+                      local_patch2=None, global_img2=None):
+        # reconstruction for view 1
+        
         local_latent, local_mask = self.forward_encoder(
             local_patch, self.cfg.train.mask_ratio, self.cfg.train.local_mae_patch)
         local_pred = self.forward_local_decoder(local_latent)  # [N, L, p*p*3]
@@ -157,8 +166,76 @@ class MAE_CNN(nn.Module):
         global_pred = self.forward_local_decoder(
             global_latent)  # [N, L, p*p*3]
         global_loss = self.recon_loss(global_img, global_pred, global_mask)
+        # default zeros for missing consistency losses
 
-        return local_loss, global_loss, local_pred, global_pred, local_mask, global_mask
+
+        # if no second view, return zeros for all consistency terms
+        if local_patch2 is None or global_img2 is None:
+            return (
+                local_loss, global_loss,
+                local_pred, global_pred,
+                local_mask, global_mask,
+                # zero, zero, zero, zero, zero, zero
+            )
+
+        # View 2 reconstruction
+        local_latent2, local_mask2 = self.forward_encoder(
+            local_patch2, self.cfg.train.mask_ratio, self.cfg.train.local_mae_patch)
+        local_pred2 = self.forward_local_decoder(local_latent2)
+        local_loss2 = self.recon_loss(local_patch2, local_pred2, local_mask2)
+
+        global_latent2, global_mask2 = self.forward_encoder(
+            global_img2, self.cfg.train.mask_ratio, self.cfg.train.global_mae_patch)
+        global_pred2 = self.forward_local_decoder(global_latent2)
+        global_loss2 = self.recon_loss(global_img2, global_pred2, global_mask2)
+
+        # Pool and flatten features for consistency 
+        # f_ll_1 = self.avgpool(local_latent).flatten(1)
+        # f_ll_2 = self.avgpool(local_latent2).flatten(1)
+        f_gl_1 = self.avgpool(global_latent).flatten(1)
+        f_gl_2 = self.avgpool(global_latent2).flatten(1)
+        
+        # f_lp_1 = local_pred.flatten(1)
+        # f_lp_2 = local_pred2.flatten(1)
+        f_gp_1 = global_pred.flatten(1)
+        f_gp_2 = global_pred2.flatten(1)
+
+        # Consistency losses
+        # latent
+        # loss_kd_ll = self.kd_loss(f_ll_1, f_ll_2)
+        # loss_fcb_ll = self.FCB_consist_loss(f_ll_1, f_ll_2)
+        # loss_tb_ll = self.TB_consist_loss(f_ll_1, f_ll_2)
+        loss_kd_gl = self.kd_loss(f_gl_1, f_gl_2)
+        loss_c_gl = self.consist_loss(f_gl_1, f_gl_2)
+        # loss_tb_gl = self.TB_consist_loss(f_gl_1, f_gl_2)
+
+        # decoder
+        # loss_kd_lp = self.kd_loss(f_lp_1, f_lp_2)
+        # loss_fcb_lp = self.FCB_consist_loss(f_lp_1, f_lp_2)
+        # loss_tb_lp = self.TB_consist_loss(f_lp_1, f_lp_2)
+        loss_kd_gp = self.kd_loss(f_gp_1, f_gp_2)
+        loss_c_gp = self.consist_loss(f_gp_1, f_gp_2)
+        # loss_tb_gp = self.TB_consist_loss(f_gp_1, f_gp_2)
+        
+        # aggregate reconstruction losses
+        local_loss  = local_loss + local_loss2
+        global_loss = global_loss + global_loss2
+        # aggregate consistency losses
+        
+
+        return (
+            local_loss, global_loss,
+            local_pred, global_pred,
+            local_mask, global_mask,
+            loss_kd_gl,
+            loss_c_gl,
+            # loss_tb_gl,
+            loss_kd_gp,
+            loss_c_gp,
+            # loss_tb_gp,  
+            
+        )
+
 
     def forward(self, local_patch, global_img):
         local_latent, local_mask = self.forward_encoder(
